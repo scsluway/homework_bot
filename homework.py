@@ -1,27 +1,25 @@
+import logging
+import logging.handlers
 import os
+import sys
 import time
+from contextlib import suppress
 from http import HTTPStatus
 
-import logging
 import requests
-from telebot import TeleBot
+from telebot import TeleBot, apihelper
 from dotenv import load_dotenv
-
-import exception
 
 load_dotenv()
 
-FORMATTER = '%(asctime)s, %(levelname)s, %(message)s'
+FORMATTER = '%(asctime)s, %(funcName)s, %(levelname)s, %(message)s'
 
-logging.basicConfig(
-    level=logging.DEBUG,
-    filename='main.log',
-    format=FORMATTER
-)
 logger = logging.getLogger(__name__)
-logger.addHandler(logging.StreamHandler('main.log'))
+logger.setLevel(level=logging.DEBUG)
+handler = logging.StreamHandler(sys.stdout)
+logger.addHandler(handler)
+handler.setFormatter(logging.Formatter(FORMATTER))
 
-formatter = logging.Formatter(FORMATTER)
 
 PRACTICUM_TOKEN = os.getenv('PRACTICUM_TOKEN')
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
@@ -38,65 +36,104 @@ HOMEWORK_VERDICTS = {
     'rejected': 'Работа проверена: у ревьюера есть замечания.'
 }
 
+variable_token_names = (
+    'PRACTICUM_TOKEN',
+    'TELEGRAM_TOKEN',
+    'TELEGRAM_CHAT_ID'
+)
+
+
+def check_message(message, previous_message, bot):
+    """Не допускает отрпавку повторных сообщений."""
+    if message != previous_message:
+        send_message(bot, message)
+        return message
+    return previous_message
+
 
 def check_tokens():
     """Проверка наличия переменных окружения."""
-    for environment_variable in (
-        PRACTICUM_TOKEN,
-        TELEGRAM_CHAT_ID,
-        TELEGRAM_TOKEN
-    ):
-        if not environment_variable:
-            logging.critical(
-                'Отсутствует обязательная переменная окружения: '
-                f'{environment_variable}'
-            )
-            raise exception.ThereIsNoToken
+    missing_tokens = [
+        name for name in variable_token_names
+        if globals()[name] is None or len(globals()[name]) == 0
+    ]
+    if len(missing_tokens):
+        message = (
+            'Отсутствуют обязательные переменные окружения: '
+            f'{missing_tokens}'
+        )
+        logger.critical(message)
+        raise ValueError(message)
 
 
 def send_message(bot, message):
     """Отправка сообщения ботом пользователю в Телеграм."""
+    logger.debug('Сообщение готовится к отправке.')
     bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=message)
-    logging.debug('message')
+    logger.debug(message)
 
 
 def get_api_answer(timestamp):
-    """Проверка успешного ответа API."""
+    """Возвращает ответ API, если получен ожидаемый результат."""
     try:
+        logger.debug('Готовится запрос к отрпавке.')
         response = requests.get(
             ENDPOINT,
             headers=HEADERS,
             params={'from_date': timestamp}
         )
-    finally:
-        if response.status_code == HTTPStatus.OK:
-            return response.json()
-        message = (
+    except requests.RequestException as error:
+        raise ValueError(
             f'Сбой в работе программы: Эндпоинт {ENDPOINT} недоступен. '
-            f'Код ответа API: {HTTPStatus.NOT_FOUND}'
+            f'Код ответа API: {error}'
         )
-        logging.error(message)
-        raise exception.WrongApiAnswer
+    else:
+        status = response.status_code
+        if status == HTTPStatus.OK:
+            logger.debug('Ответ на запрос успешно получен.')
+            return response.json()
+        else:
+            raise ValueError(
+                f'Сбой в работе программы: Эндпоинт {ENDPOINT} недоступен. '
+                f'Код ответа API: {status}'
+            )
 
 
 def check_response(response):
     """Проверяет ответ API на соответствие ожидаемых ключей."""
-    if (
-        not isinstance(response, dict)
-        or not isinstance(response.get('homeworks'), list)
-    ):
-        raise exception.KeyNotFoundError
+    logger.debug('Начало проверки ответа API.')
+    if not isinstance(response, dict):
+        raise TypeError(f'Объект {response} не является словарем.')
+    elif response.get('homeworks') is None:
+        raise KeyError(
+            f'Отсутствие ключа homeworks в объекте {response}.'
+        )
+    elif not isinstance(response.get('homeworks'), list):
+        raise TypeError('Ключ homeworks не является списком.')
+    elif len(response.get('homeworks')) == 0:
+        raise IndexError('Получен пустой список домашних работ.')
+    logger.debug('Проверка ответа успешно завершена.')
 
 
 def parse_status(homework):
     """Проверка изменеия статуса работы."""
-    status = homework.get('status')
-    if status in HOMEWORK_VERDICTS and homework.get('homework_name'):
-        homework_name = homework.get('homework_name')
-        verdict = HOMEWORK_VERDICTS.get(status)
-        return f'Изменился статус проверки работы "{homework_name}". {verdict}'
+    logger.debug('Проверка изменения статуса работы.')
+    if homework.get('status') is not None:
+        status = homework.get('status')
+        if homework.get('homework_name') is None:
+            raise KeyError(
+                f'Отсутствие ключа homework_name в списке {homework}.'
+            )
+        elif HOMEWORK_VERDICTS.get(status) is None:
+            raise KeyError(f'Неожиданный статус домашней работы {status}')
+        else:
+            homework_name = homework.get('homework_name')
+            verdict = HOMEWORK_VERDICTS.get(status)
+            logger.debug('Проверка изменения статуса работы завершена.')
+            return (f'Изменился статус проверки работы "{homework_name}". '
+                    f'{verdict}')
     else:
-        raise exception.StatusCodeError
+        raise KeyError(f'Отсутствие ключа status в списке {homework}.')
 
 
 def main():
@@ -105,43 +142,37 @@ def main():
 
     bot = TeleBot(token=TELEGRAM_TOKEN)
     timestamp = int(time.time())
-
-    response = get_api_answer(timestamp)
+    previous_message = None
 
     while True:
         try:
+            response = get_api_answer(timestamp)
             check_response(response)
             message = parse_status(response.get('homeworks')[0])
-            send_message(bot, message)
-        except exception.KeyNotFoundError:
-            if response.get('code') == 'UnknownError':
-                message = (
-                    f'Сбой в работе программы: Передано неожиданное значение. '
-                    f'Код ответа API: {HTTPStatus.BAD_REQUEST}'
-                )
-                logging.error(message)
-                send_message(bot, message)
-            elif response.get('code') == 'not_authenticated':
-                message = (
-                    f'Сбой в работе программы: {response.get("message")}. '
-                    f'Код ответа API: {HTTPStatus.UNAUTHORIZED}'
-                )
-                logging.error(message)
-                send_message(bot, message)
-            else:
-                message = 'Отсутствие ожидаемых ключей.'
-                logging.error(message)
-                send_message(bot, message)
-        except IndexError:
-            logging.debug('Получен пустой список домашних работ.')
-        except exception.StatusCodeError as status:
-            message = f'Неожиданный статус домашней работы {status}'
-            logging.error(message)
-            send_message(bot, message)
+            previous_message = check_message(message, previous_message, bot)
+            timestamp = int(time.time())
+        except TypeError as error:
+            logger.error(error)
+            previous_message = check_message(error, previous_message, bot)
+        except KeyError as error:
+            logger.error(error)
+            previous_message = check_message(error, previous_message, bot)
+        except IndexError as error:
+            logger.debug(error)
+            previous_message = check_message(error, previous_message, bot)
+        except ValueError as error:
+            logger.error(error)
+            previous_message = check_message(error, previous_message, bot)
+        except apihelper.ApiTelegramException as error:
+            logger.error(error)
+            previous_message = check_message(error, previous_message, bot)
         except Exception as error:
             message = f'Сбой в работе программы: {error}'
-            logging.error(message)
-        time.sleep(RETRY_PERIOD)
+            logger.error(message, exc_info=True)
+            with suppress(apihelper.ApiTelegramException):
+                previous_message = check_message(error, previous_message, bot)
+        finally:
+            time.sleep(RETRY_PERIOD)
 
 
 if __name__ == '__main__':
