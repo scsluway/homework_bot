@@ -44,7 +44,7 @@ variable_token_names = (
 
 def check_message(message, previous_message, bot):
     """Не допускает отрпавку повторных сообщений."""
-    if message != previous_message:
+    if str(message) != str(previous_message):
         send_message(bot, message)
         return message
     return previous_message
