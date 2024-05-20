@@ -1,5 +1,4 @@
 import logging
-import logging.handlers
 import os
 import sys
 import time
@@ -7,8 +6,8 @@ from contextlib import suppress
 from http import HTTPStatus
 
 import requests
-from telebot import TeleBot, apihelper
 from dotenv import load_dotenv
+from telebot import apihelper, TeleBot
 
 load_dotenv()
 
