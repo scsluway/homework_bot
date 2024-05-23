@@ -7,6 +7,7 @@ from http import HTTPStatus
 
 import requests
 from dotenv import load_dotenv
+from functools import wraps
 from telebot import apihelper, TeleBot
 
 load_dotenv()
@@ -46,6 +47,7 @@ def check_message(func):
     """Не допускает отрпавку повторных сообщений."""
     previous_message = ''
 
+    @wraps(func)
     def wrapper(bot, message):
         nonlocal previous_message
         if str(message) == str(previous_message):
