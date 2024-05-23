@@ -42,29 +42,36 @@ variable_token_names = (
 )
 
 
-def check_message(message, previous_message, bot):
+def check_message(func):
     """Не допускает отрпавку повторных сообщений."""
-    if str(message) != str(previous_message):
-        send_message(bot, message)
-        return message
-    return previous_message
+    previous_message = ''
+
+    def wrapper(bot, message):
+        nonlocal previous_message
+        if str(message) == str(previous_message):
+            logger.debug('Получено повторное сообщение.')
+        else:
+            func(bot, message)
+        previous_message = message
+    return wrapper
 
 
 def check_tokens():
     """Проверка наличия переменных окружения."""
     missing_tokens = [
         name for name in variable_token_names
-        if globals()[name] is None or len(globals()[name]) == 0
+        if not globals()[name]
     ]
     if len(missing_tokens):
         message = (
             'Отсутствуют обязательные переменные окружения: '
-            f'{missing_tokens}'
+            f'{", ".join(missing_tokens)}'
         )
         logger.critical(message)
         raise ValueError(message)
 
 
+@check_message
 def send_message(bot, message):
     """Отправка сообщения ботом пользователю в Телеграм."""
     logger.debug('Сообщение готовится к отправке.')
@@ -82,20 +89,19 @@ def get_api_answer(timestamp):
             params={'from_date': timestamp}
         )
     except requests.RequestException as error:
-        raise ValueError(
+        raise ConnectionError(
             f'Сбой в работе программы: Эндпоинт {ENDPOINT} недоступен. '
             f'Код ответа API: {error}'
         )
     else:
         status = response.status_code
-        if status == HTTPStatus.OK:
-            logger.debug('Ответ на запрос успешно получен.')
-            return response.json()
-        else:
+        if status != HTTPStatus.OK:
             raise ValueError(
                 f'Сбой в работе программы: Эндпоинт {ENDPOINT} недоступен. '
                 f'Код ответа API: {status}'
             )
+        logger.debug('Ответ на запрос успешно получен.')
+        return response.json()
 
 
 def check_response(response):
@@ -109,30 +115,26 @@ def check_response(response):
         )
     elif not isinstance(response.get('homeworks'), list):
         raise TypeError('Ключ homeworks не является списком.')
-    elif len(response.get('homeworks')) == 0:
-        raise IndexError('Получен пустой список домашних работ.')
     logger.debug('Проверка ответа успешно завершена.')
 
 
 def parse_status(homework):
     """Проверка изменеия статуса работы."""
     logger.debug('Проверка изменения статуса работы.')
-    if homework.get('status') is not None:
-        status = homework.get('status')
-        if homework.get('homework_name') is None:
-            raise KeyError(
-                f'Отсутствие ключа homework_name в списке {homework}.'
-            )
-        elif HOMEWORK_VERDICTS.get(status) is None:
-            raise KeyError(f'Неожиданный статус домашней работы {status}')
-        else:
-            homework_name = homework.get('homework_name')
-            verdict = HOMEWORK_VERDICTS.get(status)
-            logger.debug('Проверка изменения статуса работы завершена.')
-            return (f'Изменился статус проверки работы "{homework_name}". '
-                    f'{verdict}')
-    else:
+    status = homework.get('status')
+    verdict = HOMEWORK_VERDICTS.get(status)
+    homework_name = homework.get('homework_name')
+    if status is None:
         raise KeyError(f'Отсутствие ключа status в списке {homework}.')
+    elif homework_name is None:
+        raise KeyError(
+            f'Отсутствие ключа homework_name в списке {homework}.'
+        )
+    elif verdict is None:
+        raise ValueError(f'Неожиданный статус домашней работы {status}')
+    logger.debug('Проверка изменения статуса работы завершена.')
+    return (f'Изменился статус проверки работы "{homework_name}". '
+            f'{verdict}')
 
 
 def main():
@@ -141,35 +143,22 @@ def main():
 
     bot = TeleBot(token=TELEGRAM_TOKEN)
     timestamp = int(time.time())
-    previous_message = None
 
     while True:
         try:
             response = get_api_answer(timestamp)
             check_response(response)
-            message = parse_status(response.get('homeworks')[0])
-            previous_message = check_message(message, previous_message, bot)
+            homeworks = response.get('homeworks')
+            if homeworks:
+                message = parse_status(response.get('homeworks')[0])
+                send_message(bot, message)
             timestamp = int(time.time())
-        except TypeError as error:
-            logger.error(error)
-            previous_message = check_message(error, previous_message, bot)
-        except KeyError as error:
-            logger.error(error)
-            previous_message = check_message(error, previous_message, bot)
-        except IndexError as error:
-            logger.debug(error)
-            previous_message = check_message(error, previous_message, bot)
-        except ValueError as error:
-            logger.error(error)
-            previous_message = check_message(error, previous_message, bot)
         except apihelper.ApiTelegramException as error:
-            logger.error(error)
-            previous_message = check_message(error, previous_message, bot)
+            logger.error(error, exc_info=True)
         except Exception as error:
-            message = f'Сбой в работе программы: {error}'
-            logger.error(message, exc_info=True)
+            logger.error(error, exc_info=True)
             with suppress(apihelper.ApiTelegramException):
-                previous_message = check_message(error, previous_message, bot)
+                send_message(bot, message)
         finally:
             time.sleep(RETRY_PERIOD)
 
